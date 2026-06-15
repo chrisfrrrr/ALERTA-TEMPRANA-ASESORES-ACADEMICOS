@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import urljoin
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 class CanvasAPIError(RuntimeError):
-    pass
+    """Error legible para el usuario al consultar la API de Canvas."""
 
 
 @dataclass(slots=True)
@@ -19,10 +21,25 @@ class CanvasConnectionResult:
     profile: dict[str, Any] | None = None
 
 
-class CanvasService:
-    """Cliente mínimo y robusto para la API REST de Canvas."""
+def _chunks(values: Sequence[str], size: int) -> list[list[str]]:
+    if not values:
+        return [[]]
+    return [list(values[index : index + size]) for index in range(0, len(values), size)]
 
-    def __init__(self, base_url: str, token: str, timeout: int = 45) -> None:
+
+class CanvasService:
+    """Cliente robusto para la API REST de Canvas.
+
+    Las consultas de lectura se reintentan automáticamente y las entregas se
+    solicitan en lotes pequeños para evitar respuestas demasiado pesadas.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        timeout: int | tuple[int, int] = (15, 120),
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token.strip()
         self.timeout = timeout
@@ -31,9 +48,26 @@ class CanvasService:
             {
                 "Authorization": f"Bearer {self.token}",
                 "Accept": "application/json",
-                "User-Agent": "AVE-Alerta-Temprana/1.0",
+                "User-Agent": "AVE-Alerta-Temprana/1.1",
             }
         )
+
+        # Solo se reintentan operaciones idempotentes. Los mensajes POST no se
+        # reintentan para evitar envíos duplicados.
+        retry_policy = Retry(
+            total=3,
+            connect=3,
+            read=3,
+            status=3,
+            backoff_factor=1.0,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET", "HEAD", "OPTIONS"}),
+            respect_retry_after_header=True,
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry_policy, pool_connections=20, pool_maxsize=20)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     def _url(self, path: str) -> str:
         if path.startswith("http"):
@@ -48,9 +82,13 @@ class CanvasService:
         params: dict[str, Any] | list[tuple[str, Any]] | None = None,
         data: dict[str, Any] | list[tuple[str, Any]] | None = None,
         json: dict[str, Any] | None = None,
+        timeout: int | tuple[int, int] | None = None,
     ) -> requests.Response:
         if not self.token:
             raise CanvasAPIError("Debe ingresar un token de Canvas.")
+        if not self.base_url.startswith(("https://", "http://")):
+            raise CanvasAPIError("La URL de Canvas no es válida.")
+
         try:
             response = self.session.request(
                 method,
@@ -58,24 +96,46 @@ class CanvasService:
                 params=params,
                 data=data,
                 json=json,
-                timeout=self.timeout,
+                timeout=timeout or self.timeout,
             )
+        except requests.exceptions.ReadTimeout as exc:
+            raise CanvasAPIError(
+                "Canvas tardó demasiado en responder. La aplicación ya amplió el tiempo de espera y "
+                "reintenta automáticamente; vuelva a ejecutar el análisis o seleccione una sección específica."
+            ) from exc
+        except requests.exceptions.ConnectTimeout as exc:
+            raise CanvasAPIError(
+                "No fue posible establecer conexión con Canvas dentro del tiempo esperado. Intente nuevamente."
+            ) from exc
+        except requests.exceptions.ConnectionError as exc:
+            raise CanvasAPIError(
+                "No fue posible comunicarse con Canvas. Verifique la conexión a internet y vuelva a intentarlo."
+            ) from exc
         except requests.RequestException as exc:
-            raise CanvasAPIError(f"No fue posible conectarse con Canvas: {exc}") from exc
+            raise CanvasAPIError("Canvas no pudo completar la solicitud en este momento.") from exc
 
         if response.status_code >= 400:
-            detail = response.text[:600]
+            detail = response.text[:400]
             try:
                 payload = response.json()
                 if isinstance(payload, dict):
                     detail = str(payload.get("errors") or payload.get("message") or payload)
             except ValueError:
                 pass
+
             if response.status_code in {401, 403}:
                 raise CanvasAPIError(
-                    f"Canvas rechazó la solicitud ({response.status_code}). Revise el token y sus permisos. {detail}"
+                    f"Canvas rechazó la solicitud ({response.status_code}). Revise el token y los permisos asignados."
                 )
-            raise CanvasAPIError(f"Error de Canvas ({response.status_code}): {detail}")
+            if response.status_code == 429:
+                raise CanvasAPIError(
+                    "Canvas limitó temporalmente la cantidad de consultas. Espere un momento y vuelva a intentarlo."
+                )
+            if response.status_code >= 500:
+                raise CanvasAPIError(
+                    "Canvas presentó una interrupción temporal al procesar la consulta. Vuelva a intentarlo en unos minutos."
+                )
+            raise CanvasAPIError(f"Canvas no pudo completar la consulta ({response.status_code}): {detail}")
         return response
 
     def get(self, path: str, params: dict[str, Any] | list[tuple[str, Any]] | None = None) -> Any:
@@ -91,13 +151,17 @@ class CanvasService:
         url = self._url(path)
         current_params = params
         pages = 0
+        visited: set[str] = set()
+
         while url and pages < max_pages:
+            if url in visited:
+                break
+            visited.add(url)
             response = self._request("GET", url, params=current_params)
             payload = response.json()
             if isinstance(payload, list):
                 items.extend(payload)
             elif isinstance(payload, dict):
-                # Algunos endpoints devuelven un contenedor, se conserva como elemento.
                 items.append(payload)
             else:
                 break
@@ -156,23 +220,61 @@ class CanvasService:
         ]
         return self.get_paginated(f"/api/v1/courses/{course_id}/assignments", params=params)
 
+    def _submission_batch(
+        self,
+        path: str,
+        student_ids: Sequence[str],
+        assignment_ids: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        params: list[tuple[str, Any]] = [
+            ("per_page", 50),
+            ("grouped", "true"),
+            ("enrollment_state", "active"),
+        ]
+        for student_id in student_ids:
+            params.append(("student_ids[]", student_id))
+        for assignment_id in assignment_ids:
+            params.append(("assignment_ids[]", assignment_id))
+        return self.get_paginated(path, params=params, max_pages=25)
+
     def list_submissions(
         self,
         course_id: int | str,
         section_id: int | str | None = None,
+        *,
+        student_ids: Iterable[int | str] | None = None,
+        assignment_ids: Iterable[int | str] | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[dict[str, Any]]:
+        """Obtiene entregas en lotes pequeños para reducir tiempos de espera.
+
+        No solicita objetos de usuario ni de actividad dentro de cada entrega,
+        porque ya fueron consultados por separado durante el análisis.
+        """
         if section_id:
             path = f"/api/v1/sections/{section_id}/students/submissions"
         else:
             path = f"/api/v1/courses/{course_id}/students/submissions"
-        params: list[tuple[str, Any]] = [
-            ("per_page", 100),
-            ("student_ids[]", "all"),
-            ("grouped", "true"),
-            ("include[]", "assignment"),
-            ("include[]", "user"),
-        ]
-        return self.get_paginated(path, params=params)
+
+        students = [str(value) for value in (student_ids or []) if str(value)]
+        assignments = [str(value) for value in (assignment_ids or []) if str(value)]
+        if not students:
+            students = ["all"]
+
+        # Lotes conservadores: evitan una sola respuesta con miles de entregas.
+        student_batches = _chunks(students, 25) if students != ["all"] else [["all"]]
+        assignment_batches = _chunks(assignments, 40) if assignments else [[]]
+        total_batches = len(student_batches) * len(assignment_batches)
+        completed_batches = 0
+        results: list[dict[str, Any]] = []
+
+        for student_batch in student_batches:
+            for assignment_batch in assignment_batches:
+                results.extend(self._submission_batch(path, student_batch, assignment_batch))
+                completed_batches += 1
+                if progress_callback:
+                    progress_callback(completed_batches, total_batches)
+        return results
 
     def list_page_views(
         self,

@@ -203,9 +203,30 @@ class AnalysisService:
         assignments_raw = self.canvas.list_assignments(course_id)
         assignments = self._valid_assignments(assignments_raw, include_zero_point=include_zero_point)
 
+        user_ids = [
+            str(enrollment.get("user_id") or (enrollment.get("user") or {}).get("id") or "")
+            for enrollment in enrollments
+        ]
+        user_ids = [value for value in user_ids if value and value != "None"]
+        assignment_ids = [str(assignment.get("id")) for assignment in assignments if assignment.get("id")]
+
         if progress_callback:
-            progress_callback("Consultando entregas", 0.34)
-        submissions_raw = self.canvas.list_submissions(course_id, section_id)
+            progress_callback("Preparando consulta de entregas", 0.30)
+
+        def submission_progress(done: int, total: int) -> None:
+            if progress_callback:
+                progress_callback(
+                    f"Consultando entregas ({done}/{max(total, 1)} lotes)",
+                    0.30 + 0.30 * done / max(total, 1),
+                )
+
+        submissions_raw = self.canvas.list_submissions(
+            course_id,
+            section_id,
+            student_ids=user_ids,
+            assignment_ids=assignment_ids,
+            progress_callback=submission_progress,
+        )
         submissions_map = self._flatten_submissions(submissions_raw)
 
         total_activities = len(assignments)
@@ -216,16 +237,14 @@ class AnalysisService:
         start_time, end_time = self._course_window(course, week, analysis_date)
         sessions_map: dict[str, int | None] = {}
         page_view_errors: dict[str, str] = {}
-        user_ids = [str(enrollment.get("user_id") or enrollment.get("user", {}).get("id")) for enrollment in enrollments]
-        user_ids = [value for value in user_ids if value and value != "None"]
 
         if include_page_views and user_ids:
             if progress_callback:
-                progress_callback("Estimando ingresos a Canvas", 0.42)
+                progress_callback("Estimando ingresos a Canvas", 0.62)
 
             def page_progress(done: int, total: int) -> None:
                 if progress_callback:
-                    progress_callback("Estimando ingresos a Canvas", 0.42 + 0.28 * done / max(total, 1))
+                    progress_callback("Estimando ingresos a Canvas", 0.62 + 0.20 * done / max(total, 1))
 
             sessions_map, page_view_errors = self.canvas.fetch_page_view_sessions(
                 user_ids,
@@ -243,7 +262,7 @@ class AnalysisService:
         cutoff_dt = datetime.combine(analysis_date, time.max).replace(tzinfo=timezone.utc)
 
         if progress_callback:
-            progress_callback("Calculando indicadores", 0.74)
+            progress_callback("Calculando indicadores", 0.84)
 
         for enrollment in enrollments:
             user = enrollment.get("user") or {}

@@ -112,8 +112,11 @@ with database_tab:
     if not db.connected:
         st.warning("Agregue SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en los secretos de Streamlit.")
     else:
-        ok, message = db.test_connection()
-        st.success(message) if ok else st.error(message)
+        ok, _message = db.test_connection()
+        if ok:
+            st.success("Conexión histórica disponible")
+        else:
+            st.warning("La conexión histórica no está disponible en este momento.")
         if st.button("Sincronizar estudiantes y asignaciones", type="primary"):
             try:
                 students = db.upsert_students(wellbeing)

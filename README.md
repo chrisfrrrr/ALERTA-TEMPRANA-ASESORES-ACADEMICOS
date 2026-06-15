@@ -108,3 +108,9 @@ pytest -q
 ```
 
 Las pruebas verifican, entre otros casos, la distribución de 15 y 17 actividades a lo largo de cinco semanas.
+
+## Actualización 1.1: estabilidad de Canvas
+
+La consulta de entregas se realiza en lotes pequeños por estudiante y actividad, con reintentos automáticos y un tiempo de lectura ampliado. Esto evita cargar en una sola respuesta todas las entregas de cursos con muchos estudiantes. Los errores técnicos de conexión ya no se muestran directamente en la interfaz.
+
+Si una sección contiene una cantidad especialmente alta de estudiantes, seleccione la sección concreta antes de ejecutar el análisis para reducir todavía más el tiempo de consulta.

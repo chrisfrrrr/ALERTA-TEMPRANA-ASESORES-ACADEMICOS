@@ -76,11 +76,13 @@ with col_canvas:
 with col_supabase:
     st.subheader("Base histórica")
     if db.connected:
-        ok, message = db.test_connection()
-        st.success(message) if ok else st.error(message)
+        ok, _message = db.test_connection()
+        if ok:
+            st.success("Historial conectado")
+        else:
+            st.warning("Historial temporalmente no disponible")
     else:
-        st.warning("Supabase no configurado")
-        st.caption("El análisis funcionará en la sesión actual, pero no conservará historial entre reinicios.")
+        st.info("Historial local durante esta sesión")
 
 st.divider()
 st.subheader("Parámetros del corte")
@@ -200,38 +202,53 @@ if st.button("Ejecutar análisis semanal", type="primary", width="stretch"):
         st.session_state.analysis_diagnostics = diagnostics
         st.session_state.selected_student_id = dataframe.iloc[0]["canvas_user_id"] if not dataframe.empty else None
 
+        history_saved = False
         if db.connected and not dataframe.empty:
-            wellbeing = load_wellbeing_csv(WELLBEING_PATH)
-            db.upsert_students(wellbeing)
-            db.upsert_wellbeing_advisors(wellbeing)
-            db.sync_wellbeing_assignments(wellbeing)
-            db.upsert_students(dataframe.rename(columns={"student_name": "nombre_completo"}))
-            run_id = db.create_analysis_run(
-                {
-                    "canvas_course_id": str(selected_course["id"]),
-                    "course_name": selected_course.get("name"),
-                    "canvas_section_id": str(section_id) if section_id else None,
-                    "section_name": section_name,
-                    "week_number": week,
-                    "total_weeks": config.course_weeks,
-                    "analysis_cutoff": datetime.combine(analysis_date, datetime.max.time()).replace(tzinfo=timezone.utc).isoformat(),
-                    "mode": "demo" if demo_mode else "canvas",
-                    "student_count": len(dataframe),
-                    "activity_count": diagnostics.get("assignments_analyzed"),
-                    "created_by_name": st.session_state.get("academic_advisor"),
-                }
-            )
-            st.session_state.analysis_run_id = run_id
-            db.save_snapshots(run_id, dataframe)
+            try:
+                wellbeing = load_wellbeing_csv(WELLBEING_PATH)
+                db.upsert_students(wellbeing)
+                db.upsert_wellbeing_advisors(wellbeing)
+                db.sync_wellbeing_assignments(wellbeing)
+                db.upsert_students(dataframe.rename(columns={"student_name": "nombre_completo"}))
+                run_id = db.create_analysis_run(
+                    {
+                        "canvas_course_id": str(selected_course["id"]),
+                        "course_name": selected_course.get("name"),
+                        "canvas_section_id": str(section_id) if section_id else None,
+                        "section_name": section_name,
+                        "week_number": week,
+                        "total_weeks": config.course_weeks,
+                        "analysis_cutoff": datetime.combine(analysis_date, datetime.max.time()).replace(tzinfo=timezone.utc).isoformat(),
+                        "mode": "demo" if demo_mode else "canvas",
+                        "student_count": len(dataframe),
+                        "activity_count": diagnostics.get("assignments_analyzed"),
+                        "created_by_name": st.session_state.get("academic_advisor"),
+                    }
+                )
+                st.session_state.analysis_run_id = run_id
+                db.save_snapshots(run_id, dataframe)
+                history_saved = True
+            except DatabaseError:
+                import logging
+
+                logging.exception("No fue posible guardar el historial del análisis")
 
         progress.empty()
         st.success(f"Análisis completado para {len(dataframe)} estudiantes.")
+        if db.connected and not history_saved:
+            st.caption("El resultado quedó disponible en la sesión actual; el historial se actualizará en un próximo intento.")
     except (CanvasAPIError, DatabaseError, ValueError) as exc:
         progress.empty()
         st.error(str(exc))
-    except Exception as exc:
+    except Exception:
+        import logging
+
         progress.empty()
-        st.exception(exc)
+        logging.exception("Error inesperado durante el análisis semanal")
+        st.error(
+            "Ocurrió un inconveniente inesperado durante el análisis. "
+            "Vuelva a intentarlo; los detalles técnicos quedaron registrados en los logs de la aplicación."
+        )
 
 if st.session_state.get("analysis_df") is not None:
     dataframe = st.session_state.analysis_df
