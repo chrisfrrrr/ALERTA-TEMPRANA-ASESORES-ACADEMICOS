@@ -48,7 +48,7 @@ class CanvasService:
             {
                 "Authorization": f"Bearer {self.token}",
                 "Accept": "application/json",
-                "User-Agent": "AVE-Alerta-Temprana/1.1",
+                "User-Agent": "AVE-Alerta-Temprana/1.2",
             }
         )
 
@@ -211,6 +211,23 @@ class CanvasService:
             ("include[]", "avatar_url"),
         ]
         return self.get_paginated(path, params=params)
+
+    def list_course_students(self, course_id: int | str) -> list[dict[str, Any]]:
+        """Obtiene el directorio de estudiantes con identificadores institucionales.
+
+        El endpoint de inscripciones no siempre coloca ``sis_user_id`` o
+        ``login_id`` dentro del objeto ``user``. Esta consulta complementaria
+        permite vincular correctamente el carné con la base de bienestar.
+        """
+        params: list[tuple[str, Any]] = [
+            ("per_page", 100),
+            ("enrollment_type[]", "student"),
+            ("enrollment_state[]", "active"),
+            ("include[]", "email"),
+            ("include[]", "enrollments"),
+            ("include[]", "avatar_url"),
+        ]
+        return self.get_paginated(f"/api/v1/courses/{course_id}/users", params=params)
 
     def list_assignments(self, course_id: int | str) -> list[dict[str, Any]]:
         params: list[tuple[str, Any]] = [

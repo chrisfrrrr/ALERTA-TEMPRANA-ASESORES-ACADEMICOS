@@ -7,7 +7,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from models.config import RiskConfig
-from services.canvas_service import CanvasService
+from services.canvas_service import CanvasAPIError, CanvasService
 from services.risk_engine import (
     RISK_ORDER,
     build_reasons,
@@ -198,6 +198,38 @@ class AnalysisService:
             progress_callback("Consultando inscripciones", 0.08)
         enrollments = self.canvas.list_enrollments(course_id, section_id)
 
+        # Canvas suele devolver el SIS ID en el nivel superior del enrollment,
+        # no necesariamente dentro del objeto user. Si faltan identificadores,
+        # se consulta una sola vez el directorio del curso como respaldo.
+        def enrollment_has_identity(item: dict[str, Any]) -> bool:
+            user = item.get("user") or {}
+            values = (
+                item.get("sis_user_id"),
+                item.get("login_id"),
+                item.get("email"),
+                user.get("sis_user_id"),
+                user.get("login_id"),
+                user.get("email"),
+            )
+            return any(extract_carne(value) for value in values)
+
+        identity_coverage = sum(1 for enrollment in enrollments if enrollment_has_identity(enrollment))
+        user_directory: dict[str, dict[str, Any]] = {}
+        identity_lookup_error: str | None = None
+        if enrollments and identity_coverage < len(enrollments):
+            try:
+                if progress_callback:
+                    progress_callback("Vinculando carnés institucionales", 0.14)
+                course_students = self.canvas.list_course_students(course_id)
+                user_directory = {
+                    str(user.get("id")): user
+                    for user in course_students
+                    if isinstance(user, dict) and user.get("id") is not None
+                }
+            except CanvasAPIError as exc:
+                # El análisis puede continuar y luego intentar la coincidencia por nombre.
+                identity_lookup_error = str(exc)
+
         if progress_callback:
             progress_callback("Consultando actividades", 0.20)
         assignments_raw = self.canvas.list_assignments(course_id)
@@ -265,18 +297,33 @@ class AnalysisService:
             progress_callback("Calculando indicadores", 0.84)
 
         for enrollment in enrollments:
-            user = enrollment.get("user") or {}
-            canvas_user_id = str(enrollment.get("user_id") or user.get("id") or "")
+            enrollment_user = enrollment.get("user") or {}
+            canvas_user_id = str(enrollment.get("user_id") or enrollment_user.get("id") or "")
             if not canvas_user_id:
                 continue
+
+            directory_user = user_directory.get(canvas_user_id, {})
+            user = dict(directory_user)
+            user.update(
+                {key: value for key, value in enrollment_user.items() if value not in (None, "")}
+            )
+
             student_submissions = submissions_map.get(canvas_user_id, {})
             name = user.get("name") or user.get("sortable_name") or f"Estudiante {canvas_user_id}"
-            email = user.get("email") or user.get("login_id") or ""
+            email = (
+                user.get("email")
+                or enrollment.get("email")
+                or user.get("login_id")
+                or enrollment.get("login_id")
+                or ""
+            )
+            sis_user_id = enrollment.get("sis_user_id") or user.get("sis_user_id") or ""
+            login_id = enrollment.get("login_id") or user.get("login_id") or ""
             carne = (
-                extract_carne(user.get("sis_user_id"))
-                or extract_carne(user.get("login_id"))
+                extract_carne(sis_user_id)
+                or extract_carne(login_id)
                 or extract_carne(email)
-                or str(user.get("sis_user_id") or "")
+                or str(sis_user_id or "")
                 or f"canvas-{canvas_user_id}"
             )
 
@@ -407,6 +454,8 @@ class AnalysisService:
                 "carne": str(carne),
                 "student_name": name,
                 "email": email,
+                "canvas_sis_user_id": str(sis_user_id or ""),
+                "canvas_login_id": str(login_id or ""),
                 "career": "",
                 "avatar_url": user.get("avatar_url"),
                 "course_id": str(course_id),
@@ -468,6 +517,9 @@ class AnalysisService:
             "window_start": start_time.isoformat(),
             "window_end": end_time.isoformat(),
             "page_view_errors": page_view_errors,
+            "identity_coverage_from_enrollments": identity_coverage,
+            "identity_directory_records": len(user_directory),
+            "identity_lookup_error": identity_lookup_error,
         }
         if progress_callback:
             progress_callback("Análisis completado", 1.0)

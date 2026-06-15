@@ -190,6 +190,14 @@ if st.button("Ejecutar análisis semanal", type="primary", width="stretch"):
             wellbeing = load_wellbeing_csv(WELLBEING_PATH)
             dataframe = merge_wellbeing(dataframe, wellbeing)
             dataframe["advisor_name"] = dataframe["asesor_bienestar"]
+            diagnostics["wellbeing_records_matched"] = int(dataframe["wellbeing_record_found"].sum())
+            diagnostics["wellbeing_advisors_assigned"] = int(
+                (dataframe["asesor_bienestar"] != "Sin asignar").sum()
+            )
+            diagnostics["wellbeing_unmatched"] = int((~dataframe["wellbeing_record_found"]).sum())
+            diagnostics["wellbeing_match_methods"] = (
+                dataframe["wellbeing_match_method"].value_counts().to_dict()
+            )
             # Actualiza también el detalle individual con la asignación de bienestar.
             advisor_map = dataframe.set_index("canvas_user_id")["asesor_bienestar"].to_dict()
             for user_id, detail in details.items():
@@ -234,7 +242,21 @@ if st.button("Ejecutar análisis semanal", type="primary", width="stretch"):
                 logging.exception("No fue posible guardar el historial del análisis")
 
         progress.empty()
-        st.success(f"Análisis completado para {len(dataframe)} estudiantes.")
+        assigned_count = int(
+            (dataframe.get("asesor_bienestar", pd.Series(dtype=str)).fillna("Sin asignar") != "Sin asignar").sum()
+        )
+        matched_count = int(
+            dataframe.get("wellbeing_record_found", pd.Series(False, index=dataframe.index)).fillna(False).sum()
+        )
+        st.success(
+            f"Análisis completado para {len(dataframe)} estudiantes. "
+            f"Se asignó asesor de bienestar a {assigned_count}."
+        )
+        if matched_count < len(dataframe):
+            st.warning(
+                f"{len(dataframe) - matched_count} estudiante(s) no coincidieron con la base de bienestar. "
+                "Revise el carné o el nombre en Configuración > Supabase y bienestar."
+            )
         if db.connected and not history_saved:
             st.caption("El resultado quedó disponible en la sesión actual; el historial se actualizará en un próximo intento.")
     except (CanvasAPIError, DatabaseError, ValueError) as exc:

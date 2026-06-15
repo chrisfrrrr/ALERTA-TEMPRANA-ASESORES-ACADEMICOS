@@ -45,3 +45,21 @@ def test_timeout_message_is_friendly(monkeypatch):
     message = str(error.value)
     assert "tardó demasiado" in message
     assert "technical pool detail" not in message
+
+
+def test_course_student_directory_requests_identity_fields(monkeypatch):
+    service = CanvasService("https://example.instructure.com", "token")
+    captured = {}
+
+    def fake_get_paginated(path, params=None, max_pages=100):
+        captured["path"] = path
+        captured["params"] = list(params or [])
+        return []
+
+    monkeypatch.setattr(service, "get_paginated", fake_get_paginated)
+    service.list_course_students(77)
+
+    assert captured["path"] == "/api/v1/courses/77/users"
+    include_values = [value for key, value in captured["params"] if key == "include[]"]
+    assert "email" in include_values
+    assert "enrollments" in include_values

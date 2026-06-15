@@ -114,3 +114,9 @@ Las pruebas verifican, entre otros casos, la distribución de 15 y 17 actividade
 La consulta de entregas se realiza en lotes pequeños por estudiante y actividad, con reintentos automáticos y un tiempo de lectura ampliado. Esto evita cargar en una sola respuesta todas las entregas de cursos con muchos estudiantes. Los errores técnicos de conexión ya no se muestran directamente en la interfaz.
 
 Si una sección contiene una cantidad especialmente alta de estudiantes, seleccione la sección concreta antes de ejecutar el análisis para reducir todavía más el tiempo de consulta.
+
+## Actualización 1.2: vinculación con bienestar
+
+La aplicación ahora reconoce el carné aunque Canvas lo entregue como `sis_user_id` en la inscripción, como `login_id`, correo institucional o con prefijos como `cas`. Cuando el identificador no está disponible, utiliza una coincidencia conservadora por nombre completo y por el formato reordenado `Apellido, Nombre`.
+
+Después de cada análisis se muestra cuántos estudiantes coincidieron con la base y cuántos tienen asesor de bienestar asignado. En **Configuración > Supabase y bienestar** se puede revisar y descargar el listado de estudiantes que aún no coinciden.

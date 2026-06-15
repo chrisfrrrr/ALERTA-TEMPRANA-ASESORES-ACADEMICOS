@@ -108,6 +108,33 @@ with database_tab:
         except ValueError as exc:
             st.error(str(exc))
 
+
+    analysis_df = st.session_state.get("analysis_df")
+    if analysis_df is not None and not analysis_df.empty and "wellbeing_match_method" in analysis_df.columns:
+        st.markdown("#### Coincidencia con el último análisis")
+        matched = int(analysis_df["wellbeing_record_found"].fillna(False).sum())
+        assigned = int((analysis_df["asesor_bienestar"].fillna("Sin asignar") != "Sin asignar").sum())
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Coincidencias encontradas", matched)
+        d2.metric("Con asesor asignado", assigned)
+        d3.metric("Sin coincidencia", len(analysis_df) - matched)
+        st.dataframe(
+            analysis_df["wellbeing_match_method"].value_counts().rename_axis("Método").reset_index(name="Estudiantes"),
+            width="stretch",
+            hide_index=True,
+        )
+        unmatched = analysis_df[~analysis_df["wellbeing_record_found"].fillna(False)].copy()
+        if not unmatched.empty:
+            columns = [column for column in ["student_name", "carne_canvas_original", "email", "course_name", "section_name"] if column in unmatched.columns]
+            with st.expander("Ver estudiantes sin coincidencia"):
+                st.dataframe(unmatched[columns], width="stretch", hide_index=True)
+                st.download_button(
+                    "Descargar pendientes de vinculación",
+                    unmatched[columns].to_csv(index=False).encode("utf-8-sig"),
+                    file_name="estudiantes_sin_asesor_bienestar.csv",
+                    mime="text/csv",
+                )
+
     st.markdown("#### Sincronización con Supabase")
     if not db.connected:
         st.warning("Agregue SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en los secretos de Streamlit.")
